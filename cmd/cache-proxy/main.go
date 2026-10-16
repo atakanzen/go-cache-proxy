@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -15,71 +14,57 @@ import (
 
 	"github.com/atakanzen/cache-proxy/internal/cache"
 	"github.com/atakanzen/cache-proxy/internal/cli"
+	"github.com/atakanzen/cache-proxy/internal/middleware"
 	"github.com/atakanzen/cache-proxy/internal/proxy"
-)
-
-const (
-	requestTimeout    = 30 * time.Second
-	readHeaderTimeout = 5 * time.Second
-	readTimeout       = 15 * time.Second
-	writeTimeout      = 15 * time.Second
-	idleTimeout       = 60 * time.Second
+	"github.com/atakanzen/cache-proxy/internal/server"
 )
 
 func main() {
+	if err := run(os.Args[1:]); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	cfg, err := cli.Parse(os.Args[1:])
+	cfg, err := cli.Parse(args)
+	if errors.Is(err, flag.ErrHelp) {
+		return nil
+	}
 	if err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			os.Exit(0)
-		}
-		log.Fatalf("failed to parse arguments: %v", err)
+		return err
 	}
 
 	store := cache.NewMemory()
 	if cfg.ClearCache {
 		store.Clear()
 		log.Println("cache store cleared successfully")
-		os.Exit(0)
+		return nil
 	}
-
-	addr := fmt.Sprintf(":%d", cfg.Port)
 
 	originURL, err := url.Parse(cfg.Origin)
 	if err != nil {
-		log.Fatalf("failed to parse the origin URL: %v", err)
+		return err
 	}
 
-	httpClient := &http.Client{
-		Timeout: requestTimeout,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
+	client := server.NewOriginClient()
+	proxyHandler := proxy.New(originURL, store, client)
+	addr := fmt.Sprintf(":%d", cfg.Port)
+
+	chain := middleware.Chain{
+		middleware.LogRequest,
+		middleware.AddProxyHeaders,
 	}
+	handler := chain.Then(proxyHandler)
 
-	proxyHandler := proxy.New(originURL, store, httpClient)
+	srv := server.NewHTTPServer(addr, handler)
 
-	server := &http.Server{
-		Addr:              addr,
-		Handler:           proxyHandler,
-		ReadHeaderTimeout: readHeaderTimeout,
-		ReadTimeout:       readTimeout,
-		WriteTimeout:      writeTimeout,
-		IdleTimeout:       idleTimeout,
-	}
-
-	go func() {
-		log.Println("cache-proxy server listening on:", addr)
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("failed to run cache-proxy server: %v", err)
-		}
-	}()
-
+	log.Printf("cache-proxy server started listening on %s\n", addr)
+	go srv.ListenAndServe()
 	<-ctx.Done()
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	shutDownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-
-	server.Shutdown(shutdownCtx)
+	return srv.Shutdown(shutDownCtx)
 }

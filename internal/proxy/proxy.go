@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/atakanzen/cache-proxy/internal/cache"
 )
@@ -18,6 +19,7 @@ const (
 
 	// ----- RESPONSE SIZE -----
 	maxBodySize = 10 * 1024 * 1024 // 10 MB
+
 )
 
 type ProxyHandler struct {
@@ -37,7 +39,7 @@ func New(origin *url.URL, c cache.Cache, httpClient *http.Client) *ProxyHandler 
 func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	target := p.createTargetURL(*req.URL)
 
-	// We pass through any requst that's not GET
+	// We pass through any request that's not GET
 	if req.Method != http.MethodGet {
 		nonProxiedReq, err := http.NewRequest(req.Method, target.String(), req.Body)
 		if err != nil {
@@ -45,6 +47,7 @@ func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			http.Error(w, "something went wrong", http.StatusInternalServerError)
 			return
 		}
+		p.copyHeaders(nonProxiedReq.Header, req.Header)
 
 		resp, err := p.httpClient.Do(nonProxiedReq)
 		if err != nil {
@@ -86,6 +89,7 @@ func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "failed to create a new origin request", http.StatusInternalServerError)
 		return
 	}
+	p.copyHeaders(originRequest.Header, req.Header)
 
 	res, err := p.httpClient.Do(originRequest)
 	if err != nil {
@@ -142,12 +146,21 @@ func (p *ProxyHandler) copyHeaders(dest, src http.Header) {
 		"Proxy-Connection":    {},
 		"Proxy-Authenticate":  {},
 		"Proxy-Authorization": {},
-		"TE":                  {},
-		"Trailers":            {},
+		"Te":                  {},
+		"Trailer":             {},
 		"Transfer-Encoding":   {},
 		"Upgrade":             {},
 		// Also Content-Length so we will calculate this instead.
 		"Content-Length": {},
+	}
+
+	// Additional to the static list, also respect Connection header values deletion
+	for _, tok := range src["Connection"] {
+		for _, name := range strings.Split(tok, ",") {
+			if h := strings.TrimSpace(name); h != "" {
+				src.Del(h)
+			}
+		}
 	}
 
 	for name, values := range src {
