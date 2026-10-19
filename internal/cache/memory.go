@@ -1,6 +1,9 @@
 package cache
 
-import "sync"
+import (
+	"context"
+	"sync"
+)
 
 type Memory struct {
 	mu      sync.RWMutex
@@ -13,7 +16,7 @@ func NewMemory() *Memory {
 	}
 }
 
-func (m *Memory) Get(key string) (Entry, bool) {
+func (m *Memory) Get(ctx context.Context, key string) (Entry, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -21,16 +24,18 @@ func (m *Memory) Get(key string) (Entry, bool) {
 	return entry, ok
 }
 
-func (m *Memory) Set(key string, entry Entry) {
+func (m *Memory) Set(ctx context.Context, key string, entry Entry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	m.entries[key] = entry
+	return nil
 }
 
-func (m *Memory) Clear() {
+func (m *Memory) Clear(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	m.entries = make(map[string]Entry)
+	return nil
 }

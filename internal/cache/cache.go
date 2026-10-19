@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
@@ -13,9 +14,9 @@ type Entry struct {
 }
 
 type Cache interface {
-	Get(key string) (Entry, bool)
-	Set(key string, entry Entry)
-	Clear()
+	Get(ctx context.Context, key string) (Entry, bool)
+	Set(ctx context.Context, key string, entry Entry) error
+	Clear(ctx context.Context) error
 }
 
 func HashURLPath(urlPath string) string {

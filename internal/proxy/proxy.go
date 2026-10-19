@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"context"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -37,22 +39,13 @@ func New(origin *url.URL, c cache.Cache, httpClient *http.Client) *ProxyHandler 
 }
 
 func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	target := p.createTargetURL(*req.URL)
+	ctx := req.Context()
 
-	// We pass through any request that's not GET
 	if req.Method != http.MethodGet {
-		nonProxiedReq, err := http.NewRequest(req.Method, target.String(), req.Body)
+		resp, err := p.doRequest(ctx, req)
 		if err != nil {
-			log.Printf("failed to create a non-proxied request: %s", err.Error())
-			http.Error(w, "something went wrong", http.StatusInternalServerError)
-			return
-		}
-		p.copyHeaders(nonProxiedReq.Header, req.Header)
-
-		resp, err := p.httpClient.Do(nonProxiedReq)
-		if err != nil {
-			log.Printf("failed to reach origin server %s: %v", target.String(), err)
-			http.Error(w, "failed to reach origin server", http.StatusBadGateway)
+			slog.Error("failed request to origin server", "err", err)
+			http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
 			return
 		}
 		defer resp.Body.Close()
@@ -73,7 +66,7 @@ func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	hashedRequestURI := cache.HashURLPath(req.URL.RequestURI())
 
 	// Cached, return the entry and add the X-Cache: HIT
-	if entry, ok := p.cache.Get(hashedRequestURI); ok {
+	if entry, ok := p.cache.Get(ctx, hashedRequestURI); ok {
 		p.copyHeaders(w.Header(), entry.Headers)
 		w.Header().Set("Content-Length", strconv.Itoa(len(entry.Body)))
 		w.Header().Add(cacheHeaderKey, hit)
@@ -83,29 +76,19 @@ func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// Not cached, make the original request
-	originRequest, err := http.NewRequest(http.MethodGet, target.String(), req.Body)
+	res, err := p.doRequest(ctx, req)
 	if err != nil {
-		log.Printf("failed to create a new origin request: %v", err)
-		http.Error(w, "failed to create a new origin request", http.StatusInternalServerError)
-		return
-	}
-	p.copyHeaders(originRequest.Header, req.Header)
-
-	res, err := p.httpClient.Do(originRequest)
-	if err != nil {
-		log.Printf("failed to GET origin request: %v", err)
-		// This err happens only for the HTTP protocol level, non 2XX responses do not return an error from upstream
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		slog.Error("failed request to origin server", "err", err)
+		http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
 		return
 	}
 	defer res.Body.Close()
 
 	res.Body = http.MaxBytesReader(w, res.Body, maxBodySize)
-
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
-		log.Printf("failed to read origin response body: %v", err)
-		http.Error(w, "failed to read origin response body", http.StatusInternalServerError)
+		slog.Error("failed to read origin response body", "err", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 
@@ -117,7 +100,7 @@ func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			Headers:    res.Header.Clone(),
 		}
 
-		p.cache.Set(hashedRequestURI, entry)
+		p.cache.Set(ctx, hashedRequestURI, entry)
 	}
 
 	p.copyHeaders(w.Header(), res.Header)
@@ -126,9 +109,21 @@ func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	w.WriteHeader(res.StatusCode)
 
 	if _, err := w.Write(body); err != nil {
-		log.Printf("failed to write response body: %v", err)
-		http.Error(w, "failed to write response body", http.StatusInternalServerError)
+		slog.Error("failed to write response body", "err", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 	}
+}
+
+func (p *ProxyHandler) doRequest(ctx context.Context, incomingReq *http.Request) (*http.Response, error) {
+	target := p.createTargetURL(*incomingReq.URL)
+	request, err := http.NewRequestWithContext(ctx, incomingReq.Method, target.String(), incomingReq.Body)
+	if err != nil {
+		slog.Error("failed to create a request", "err", err)
+		return nil, err
+	}
+	p.copyHeaders(request.Header, incomingReq.Header)
+
+	return p.httpClient.Do(request)
 }
 
 func (p *ProxyHandler) createTargetURL(requestURL url.URL) *url.URL {

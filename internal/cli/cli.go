@@ -3,6 +3,7 @@ package cli
 import (
 	"flag"
 	"fmt"
+	"time"
 
 	"github.com/atakanzen/cache-proxy/internal/config"
 )
@@ -18,6 +19,7 @@ func Parse(args []string) (config.Config, error) {
 	fs.UintVar(&cfg.Port, "port", defaultPort, "The port for the cache proxy to run")
 	fs.StringVar(&cfg.Origin, "origin", "", "The origin url to put the cache in front of (required)")
 	fs.BoolVar(&cfg.ClearCache, "clear", false, "If passed, this flag will clear the cache")
+	fs.DurationVar(&cfg.TTL, "ttl", 5*time.Minute, "How long cached responses live")
 
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "cache-proxy, powered by go. Available flags:\n\n")
